@@ -1,3 +1,4 @@
+
 const express = require("express");
 const cors = require("cors");
 const mongoose = require("mongoose");
@@ -5,22 +6,27 @@ const { Resend } = require("resend");
 
 const app = express();
 
+// -------------------------------------
+// CORS CONFIGURATION
+// -------------------------------------
 
 const allowedOrigins = [
   "http://localhost:3000",
   "https://depfront.vercel.app",
-  "https://bulkmail-two-theta.vercel.app",
+  "https://bulkmail-e5cvceq5h-noorthowfiq-ux1.vercel.app",
 ];
 
 app.use(
   cors({
     origin: (origin, callback) => {
+      // Requests without an Origin header, such as server-to-server
+      // requests, are allowed. Browser origins must be listed above.
       if (!origin || allowedOrigins.includes(origin)) {
         return callback(null, true);
       }
 
-      console.error("CORS blocked origin:", origin);
-      return callback(new Error("Origin not allowed by CORS"));
+      console.warn("CORS blocked origin:", origin);
+      return callback(null, false);
     },
     methods: ["GET", "POST", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
@@ -31,16 +37,14 @@ app.use(express.json({ limit: "1mb" }));
 
 // -------------------------------------
 // CONFIGURATION
+// Set these in Render > Environment.
 // -------------------------------------
 
 const MONGODB_URI = process.env.MONGODB_URI;
-
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const FROM_EMAIL = process.env.FROM_EMAIL || "onboarding@resend.dev";
 
-// Replace with a sender address permitted by Resend.
-const FROM_EMAIL = "onboarding@resend.dev";
-
-const resend = new Resend(RESEND_API_KEY);
+const resend = RESEND_API_KEY ? new Resend(RESEND_API_KEY) : null;
 
 // -------------------------------------
 // DATABASE
@@ -59,33 +63,27 @@ const campaignSchema = new mongoose.Schema({
     type: String,
     required: true,
   },
-
   recipients: {
     type: [String],
     required: true,
   },
-
   recipientCount: {
     type: Number,
     default: 0,
   },
-
   sentCount: {
     type: Number,
     default: 0,
   },
-
   status: {
     type: String,
     enum: ["pending", "sending", "sent", "failed"],
     default: "pending",
   },
-
   error: {
     type: String,
     default: "",
   },
-
   createdAt: {
     type: Date,
     default: Date.now,
@@ -103,7 +101,7 @@ app.get("/", (req, res) => {
 });
 
 // -------------------------------------
-// SEND EMAIL USING RESEND
+// PROCESS CAMPAIGN
 // -------------------------------------
 
 async function processCampaign(campaignId) {
@@ -152,7 +150,6 @@ async function processCampaign(campaignId) {
 
         campaign.status = "failed";
         campaign.error = error.message || "Email sending failed.";
-
         await campaign.save();
         return;
       }
@@ -171,7 +168,6 @@ async function processCampaign(campaignId) {
         campaign.status = "failed";
         campaign.error =
           error.message || "Unknown campaign processing error.";
-
         await campaign.save();
       } catch (dbError) {
         console.error("Could not update campaign:", dbError.message);
@@ -221,6 +217,15 @@ app.post("/sendemail", async (req, res) => {
       return res.status(400).json({
         success: false,
         message: "No valid email addresses were provided.",
+      });
+    }
+
+    if (!resend) {
+      console.error("RESEND_API_KEY is not configured.");
+
+      return res.status(500).json({
+        success: false,
+        message: "Email service is not configured.",
       });
     }
 
@@ -276,7 +281,7 @@ app.get("/campaigns", async (req, res) => {
 
     return res.status(200).json(campaigns);
   } catch (error) {
-    console.error("Error fetching campaigns:", error.message);
+    console.error("Error fetching campaign history:", error.message);
 
     return res.status(500).json({
       message: "Unable to fetch campaign history.",
@@ -290,13 +295,13 @@ app.get("/campaigns", async (req, res) => {
 
 async function startServer() {
   try {
-    if (!MONGODB_URI || !RESEND_API_KEY) {
-      throw new Error(
-        "Missing MONGODB_URI or RESEND_API_KEY environment variable"
-      );
+    if (!MONGODB_URI) {
+      throw new Error("Missing MONGODB_URI environment variable");
     }
 
-    
+    if (!RESEND_API_KEY) {
+      throw new Error("Missing RESEND_API_KEY environment variable");
+    }
 
     await mongoose.connect(MONGODB_URI);
 
