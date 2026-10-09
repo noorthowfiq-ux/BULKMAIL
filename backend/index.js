@@ -3,7 +3,7 @@ const express = require("express");
 const cors = require("cors");
 const mongoose = require("mongoose");
 const { Resend } = require("resend");
-
+const nodemailer = require("nodemailer");
 const app = express();
 
 // -------------------------------------
@@ -180,33 +180,31 @@ async function processCampaign(campaignId) {
 // CREATE CAMPAIGN
 // -------------------------------------
 
+
 app.post("/sendemail", async (req, res) => {
   try {
-    const emailMessage = req.body.msg ?? req.body.message;
-    const emailList = req.body.emailList;
+    const { msg, emailList } = req.body;
 
-    if (
-      typeof emailMessage !== "string" ||
-      !emailMessage.trim()
-    ) {
+    if (!msg || !Array.isArray(emailList) || emailList.length === 0) {
       return res.status(400).json({
-        success: false,
-        message: "Email message is empty or missing.",
+        message: "Please provide a message and recipient email list.",
       });
     }
 
-    if (!Array.isArray(emailList) || emailList.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: "No recipients provided.",
+    const smtpUser = process.env.SMTP_USER;
+    const smtpPass = process.env.SMTP_PASS;
+
+    if (!smtpUser || !smtpPass) {
+      return res.status(500).json({
+        message: "Gmail SMTP credentials are missing in Render.",
       });
     }
 
+    // Remove duplicates and validate recipient addresses.
     const recipients = [
       ...new Set(
         emailList
-          .filter((email) => typeof email === "string")
-          .map((email) => email.trim().toLowerCase())
+          .map((email) => String(email).trim().toLowerCase())
           .filter((email) =>
             /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
           )
@@ -215,56 +213,58 @@ app.post("/sendemail", async (req, res) => {
 
     if (recipients.length === 0) {
       return res.status(400).json({
-        success: false,
-        message: "No valid email addresses were provided.",
+        message: "No valid recipient email addresses were provided.",
       });
     }
 
-    if (!resend) {
-      console.error("RESEND_API_KEY is not configured.");
-
-      return res.status(500).json({
-        success: false,
-        message: "Email service is not configured.",
+    // Keep batches small and send only to consenting recipients.
+    if (recipients.length > 20) {
+      return res.status(400).json({
+        message: "Please send to a maximum of 20 recipients per batch.",
       });
     }
 
-    const campaign = await Campaign.create({
-      message: emailMessage.trim(),
-      recipients,
-      recipientCount: recipients.length,
-      sentCount: 0,
-      status: "pending",
-      error: "",
+    const transporter = nodemailer.createTransport({
+      service: "gmail",
+      auth: {
+        user: smtpUser,
+        pass: smtpPass,
+      },
     });
 
-    console.log("Campaign created:", campaign._id);
+    let sentCount = 0;
+    const failed = [];
 
-    res.status(202).json({
-      success: true,
-      message:
-        "Campaign queued. Check campaign history for its sending status.",
-      campaignId: campaign._id,
-      recipientCount: campaign.recipientCount,
-      sentCount: 0,
-      status: "pending",
-    });
+    // Send each email separately so recipients do not see
+    // the other recipients' addresses.
+    for (const recipient of recipients) {
+      try {
+        await transporter.sendMail({
+          from: smtpUser,
+          to: recipient,
+          subject: "Message from BulkMail",
+          text: msg,
+        });
 
-    // Process emails after returning the HTTP response.
-    setImmediate(() => {
-      processCampaign(campaign._id).catch((error) => {
-        console.error("Unexpected campaign error:", error.message);
-      });
+        sentCount++;
+      } catch (error) {
+        console.error("Email failed:", recipient, error.message);
+        failed.push(recipient);
+      }
+    }
+
+    return res.status(200).json({
+      message: "Email sending process completed.",
+      sentCount,
+      failedCount: failed.length,
+      failed,
     });
   } catch (error) {
-    console.error("Unable to create campaign:", error.message);
+    console.error("Email sending error:", error.message);
 
-    if (!res.headersSent) {
-      return res.status(500).json({
-        success: false,
-        message: "Unable to create the email campaign.",
-      });
-    }
+    return res.status(500).json({
+      message: "Unable to send emails. Check the backend logs.",
+    });
   }
 });
 
