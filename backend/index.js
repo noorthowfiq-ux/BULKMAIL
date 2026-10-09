@@ -9,6 +9,7 @@ const corsOptions = {
   origin: [
     "http://localhost:3000",
     "https://depfront.vercel.app",
+    "https://bulkmail-two-theta.vercel.app"
   ],
 };
 
@@ -77,7 +78,7 @@ const transporter = nodemailer.createTransport({
 });
 
 const emailTemplate = (message, recipient) => ({
-  from: "YOUR_GMAIL_ADDRESS",
+  from: "laugherlaugher9@gmail.com",
   to: recipient,
   subject: "You get Text Message from Your App!",
   text: message,
