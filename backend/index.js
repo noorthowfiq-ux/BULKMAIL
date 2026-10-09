@@ -1,7 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const mongoose = require("mongoose");
-const nodemailer = require("nodemailer");
+const { Resend } = require("resend");
 
 const app = express();
 
@@ -24,8 +24,12 @@ app.use(express.json({ limit: "1mb" }));
 const MONGODB_URI =
   "mongodb+srv://BULKMAIL-:IQ37UPFEmEU2m62V@mailshot.s8ilzmw.mongodb.net/bulkmail";
 
-const GMAIL_USER = "laugherlaugher9@gmail.com";
-const GMAIL_APP_PASSWORD = "kiym zgco qfkr isnu";
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+
+// Replace with a sender address permitted by Resend.
+const FROM_EMAIL = "onboarding@resend.dev";
+
+const resend = new Resend(RESEND_API_KEY);
 
 // -------------------------------------
 // DATABASE
@@ -80,40 +84,15 @@ const campaignSchema = new mongoose.Schema({
 const Campaign = mongoose.model("Campaign", campaignSchema);
 
 // -------------------------------------
-// EMAIL TRANSPORT
+// HEALTH CHECK
 // -------------------------------------
 
-const transporter = nodemailer.createTransport({
-  host: "smtp.gmail.com",
-  port: 465,
-  secure: true,
-
-  auth: {
-    user: GMAIL_USER,
-    pass: GMAIL_APP_PASSWORD,
-  },
-
-  // Fail relatively quickly if SMTP cannot connect.
-  connectionTimeout: 10000,
-  greetingTimeout: 10000,
-  socketTimeout: 20000,
+app.get("/", (req, res) => {
+  res.status(200).send("BulkMail Backend is running successfully!");
 });
 
 // -------------------------------------
-// EMAIL TEMPLATE
-// -------------------------------------
-
-function emailTemplate(message, recipient) {
-  return {
-    from: GMAIL_USER,
-    to: recipient,
-    subject: "You get Text Message from Your App!",
-    text: message,
-  };
-}
-
-// -------------------------------------
-// BACKGROUND CAMPAIGN PROCESSOR
+// SEND EMAIL USING RESEND
 // -------------------------------------
 
 async function processCampaign(campaignId) {
@@ -131,29 +110,37 @@ async function processCampaign(campaignId) {
     campaign.error = "";
     await campaign.save();
 
-    console.log("Starting campaign:", campaignId);
-    console.log("Recipient count:", campaign.recipients.length);
+    console.log("Processing campaign:", campaignId);
 
     for (const recipient of campaign.recipients) {
       try {
-        const info = await transporter.sendMail(
-          emailTemplate(campaign.message, recipient)
-        );
+        const { data, error } = await resend.emails.send({
+          from: `BulkMail <${FROM_EMAIL}>`,
+          to: [recipient],
+          subject: "You get Text Message from Your App!",
+          text: campaign.message,
+        });
 
-        console.log("Email sent to:", recipient);
-        console.log("Message ID:", info.messageId);
+        if (error) {
+          throw new Error(
+            error.message || "Resend failed to accept the email."
+          );
+        }
+
+        console.log("Email accepted by Resend for:", recipient);
+        console.log("Resend email ID:", data?.id);
 
         campaign.sentCount += 1;
         await campaign.save();
       } catch (error) {
         console.error(
-          "Email failed for recipient:",
+          "Email sending failed for:",
           recipient,
           error.message
         );
 
         campaign.status = "failed";
-        campaign.error = error.message || "Email delivery failed.";
+        campaign.error = error.message || "Email sending failed.";
 
         await campaign.save();
         return;
@@ -166,7 +153,7 @@ async function processCampaign(campaignId) {
 
     console.log("Campaign completed:", campaignId);
   } catch (error) {
-    console.error("Campaign processing error:", error);
+    console.error("Campaign processing error:", error.message);
 
     if (campaign) {
       try {
@@ -176,25 +163,14 @@ async function processCampaign(campaignId) {
 
         await campaign.save();
       } catch (dbError) {
-        console.error(
-          "Unable to update campaign:",
-          dbError.message
-        );
+        console.error("Could not update campaign:", dbError.message);
       }
     }
   }
 }
 
 // -------------------------------------
-// HEALTH CHECK
-// -------------------------------------
-
-app.get("/", (req, res) => {
-  res.status(200).send("BulkMail Backend is running successfully!");
-});
-
-// -------------------------------------
-// SEND EMAILS
+// CREATE CAMPAIGN
 // -------------------------------------
 
 app.post("/sendemail", async (req, res) => {
@@ -212,10 +188,7 @@ app.post("/sendemail", async (req, res) => {
       });
     }
 
-    if (
-      !Array.isArray(emailList) ||
-      emailList.length === 0
-    ) {
+    if (!Array.isArray(emailList) || emailList.length === 0) {
       return res.status(400).json({
         success: false,
         message: "No recipients provided.",
@@ -251,25 +224,24 @@ app.post("/sendemail", async (req, res) => {
 
     console.log("Campaign created:", campaign._id);
 
-    // Respond immediately; don't make the browser wait for SMTP.
     res.status(202).json({
       success: true,
       message:
-        "Campaign accepted. Check campaign history for the final status.",
+        "Campaign queued. Check campaign history for its sending status.",
       campaignId: campaign._id,
       recipientCount: campaign.recipientCount,
-      sentCount: campaign.sentCount,
-      status: campaign.status,
+      sentCount: 0,
+      status: "pending",
     });
 
-    // Continue processing after the response has been sent.
+    // Process emails after returning the HTTP response.
     setImmediate(() => {
       processCampaign(campaign._id).catch((error) => {
-        console.error("Unexpected background error:", error);
+        console.error("Unexpected campaign error:", error.message);
       });
     });
   } catch (error) {
-    console.error("Unable to create campaign:", error);
+    console.error("Unable to create campaign:", error.message);
 
     if (!res.headersSent) {
       return res.status(500).json({
@@ -307,17 +279,13 @@ app.get("/campaigns", async (req, res) => {
 
 async function startServer() {
   try {
-    if (
-      MONGODB_URI === "YOUR_NEW_MONGODB_CONNECTION_STRING" ||
-      !GMAIL_USER ||
-      GMAIL_USER === "YOUR_GMAIL_ADDRESS" ||
-      !GMAIL_APP_PASSWORD ||
-      GMAIL_APP_PASSWORD === "YOUR_NEW_GMAIL_APP_PASSWORD"
-    ) {
+    if (!MONGODB_URI || !RESEND_API_KEY) {
       throw new Error(
-        "Please configure the MongoDB URI and Gmail credentials."
+        "Missing MONGODB_URI or RESEND_API_KEY environment variable"
       );
     }
+
+    
 
     await mongoose.connect(MONGODB_URI);
 
