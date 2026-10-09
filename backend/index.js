@@ -5,13 +5,25 @@ const { Resend } = require("resend");
 
 const app = express();
 
+
+const allowedOrigins = [
+  "http://localhost:3000",
+  "https://depfront.vercel.app",
+  "https://bulkmail-two-theta.vercel.app",
+];
+
 app.use(
   cors({
-    origin: [
-      "http://localhost:3000",
-      "https://depfront.vercel.app",
-      "https://bulkmail-two-theta.vercel.app",
-    ],
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+
+      console.error("CORS blocked origin:", origin);
+      return callback(new Error("Origin not allowed by CORS"));
+    },
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
 
@@ -21,8 +33,7 @@ app.use(express.json({ limit: "1mb" }));
 // CONFIGURATION
 // -------------------------------------
 
-const MONGODB_URI =
-  "mongodb+srv://BULKMAIL-:IQ37UPFEmEU2m62V@mailshot.s8ilzmw.mongodb.net/bulkmail";
+const MONGODB_URI = process.env.MONGODB_URI;
 
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
 
