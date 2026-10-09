@@ -10,13 +10,11 @@ function App() {
   const [status, setStatus] = useState("idle");
   const [sendResult, setSendResult] = useState("");
 
-  
   function handlemsg(event) {
     setMsg(event.target.value);
     setSendResult("");
   }
 
-  
   function handlefile(event) {
     const file = event.target.files?.[0];
 
@@ -49,7 +47,6 @@ function App() {
           defval: "",
         });
 
-        
         const validEmails = [
           ...new Set(
             rows
@@ -70,11 +67,11 @@ function App() {
 
         setEmailList(validEmails);
         setFileName(file.name);
+        setStatus("idle");
+
         setSendResult(
           `${validEmails.length} valid email address(es) loaded successfully.`
         );
-
-        console.log("Valid recipients:", validEmails);
       } catch (error) {
         console.error("Excel parsing error:", error);
         setSendResult("Unable to read this Excel file.");
@@ -88,7 +85,6 @@ function App() {
     reader.readAsArrayBuffer(file);
   }
 
-  
   async function sendEmails() {
     if (!msg.trim()) {
       setSendResult("Please enter an email message.");
@@ -96,7 +92,9 @@ function App() {
     }
 
     if (emailList.length === 0) {
-      setSendResult("Please upload an Excel file with valid email addresses.");
+      setSendResult(
+        "Please upload an Excel file with valid email addresses."
+      );
       return;
     }
 
@@ -109,20 +107,52 @@ function App() {
         {
           msg: msg.trim(),
           emailList: emailList,
+        },
+        {
+          timeout: 30000,
         }
       );
 
-      setStatus("success");
-      setSendResult(
-        response.data?.message || "Email request completed successfully."
-      );
+      if (
+        response.data?.status === "failed" ||
+        response.data?.success === false
+      ) {
+        setStatus("error");
+        setSendResult(
+          response.data?.message ||
+            response.data?.error ||
+            "The backend reported that email sending failed."
+        );
+      } else {
+        setStatus("success");
+        setSendResult(
+          response.data?.message ||
+            "The server accepted the email request. Check campaign history to confirm delivery."
+        );
+      }
     } catch (error) {
       console.error("Email sending error:", error);
 
       setStatus("error");
-      setSendResult(
-        error.response?.data?.message ||
-          "Unable to send emails. Check that your backend is running on port 5000."
+
+      if (error.code === "ECONNABORTED") {
+        setSendResult(
+          "Request timed out after 30 seconds. Check campaign history before trying again."
+        );
+      } else if (error.response) {
+        setSendResult(
+          error.response.data?.message ||
+            error.response.data?.error ||
+            `Server error: ${error.response.status}. Check your backend logs.`
+        );
+      } else {
+        setSendResult(
+          "Unable to reach the backend. Check the backend service and network connection."
+        );
+      }
+    } finally {
+      setStatus((currentStatus) =>
+        currentStatus === "sending" ? "error" : currentStatus
       );
     }
   }
@@ -131,6 +161,7 @@ function App() {
     setEmailList([]);
     setFileName("");
     setSendResult("");
+    setStatus("idle");
 
     const fileInput = document.getElementById("excel-file");
 
@@ -138,6 +169,20 @@ function App() {
       fileInput.value = "";
     }
   }
+
+  const statusLabel = {
+    idle: "Ready",
+    sending: "Sending",
+    success: "Completed",
+    error: "Error",
+  };
+
+  const statusDot = {
+    idle: "bg-gray-400",
+    sending: "bg-yellow-500",
+    success: "bg-green-500",
+    error: "bg-red-500",
+  };
 
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900">
@@ -152,23 +197,9 @@ function App() {
 
           <div className="flex items-center gap-2 rounded-full border border-gray-200 px-3 py-1.5 text-sm text-gray-600">
             <span
-              className={`h-2 w-2 rounded-full ${
-                status === "sending"
-                  ? "bg-yellow-500"
-                  : status === "success"
-                  ? "bg-green-500"
-                  : status === "error"
-                  ? "bg-red-500"
-                  : "bg-gray-400"
-              }`}
+              className={`h-2 w-2 rounded-full ${statusDot[status]}`}
             />
-            {status === "sending"
-              ? "Sending"
-              : status === "success"
-              ? "Completed"
-              : status === "error"
-              ? "Error"
-              : "Ready"}
+            {statusLabel[status]}
           </div>
         </div>
       </header>
@@ -187,9 +218,7 @@ function App() {
           <section className="space-y-6 md:col-span-3">
             <div className="rounded-xl border border-gray-200 bg-white p-6">
               <div className="mb-5">
-                <h3 className="text-base font-semibold">
-                  1. Recipients
-                </h3>
+                <h3 className="text-base font-semibold">1. Recipients</h3>
                 <p className="mt-1 text-sm text-gray-500">
                   Upload an Excel file with email addresses in column A.
                 </p>
@@ -234,7 +263,6 @@ function App() {
                 <span className="text-sm text-gray-500">
                   Recipients loaded
                 </span>
-
                 <span className="rounded-md bg-gray-100 px-2.5 py-1 text-sm font-semibold text-gray-800">
                   {emailList.length}
                 </span>
@@ -250,7 +278,8 @@ function App() {
                     <button
                       type="button"
                       onClick={clearRecipients}
-                      className="text-sm text-gray-500 hover:text-red-600"
+                      disabled={status === "sending"}
+                      className="text-sm text-gray-500 hover:text-red-600 disabled:opacity-50"
                     >
                       Remove list
                     </button>
@@ -316,27 +345,21 @@ function App() {
 
               <div className="mt-5 divide-y divide-gray-100">
                 <div className="flex items-center justify-between py-4">
-                  <span className="text-sm text-gray-500">
-                    Recipients
-                  </span>
+                  <span className="text-sm text-gray-500">Recipients</span>
                   <span className="text-sm font-semibold">
                     {emailList.length}
                   </span>
                 </div>
 
                 <div className="flex items-center justify-between py-4">
-                  <span className="text-sm text-gray-500">
-                    Message
-                  </span>
+                  <span className="text-sm text-gray-500">Message</span>
                   <span className="text-sm font-medium">
                     {msg.trim() ? "Added" : "Not added"}
                   </span>
                 </div>
 
                 <div className="flex items-center justify-between py-4">
-                  <span className="text-sm text-gray-500">
-                    Excel file
-                  </span>
+                  <span className="text-sm text-gray-500">Excel file</span>
                   <span className="max-w-36 truncate text-sm font-medium">
                     {fileName || "None"}
                   </span>
@@ -364,6 +387,7 @@ function App() {
             {sendResult && (
               <div
                 role="status"
+                aria-live="polite"
                 className={`mt-4 rounded-lg border p-4 text-sm ${
                   status === "error"
                     ? "border-red-200 bg-red-50 text-red-700"
