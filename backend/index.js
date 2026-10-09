@@ -14,7 +14,9 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 app.use(express.json());
-
+app.get("/", (req, res) => {
+  res.send("BulkMail Backend is running successfully!");
+});
 const MONGODB_URI =
   "mongodb+srv://BULKMAIL-:IQ37UPFEmEU2m62V@mailshot.s8ilzmw.mongodb.net/bulkmail";
 
