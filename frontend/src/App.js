@@ -105,7 +105,7 @@ function App() {
 
     try {
       const response = await axios.post(
-        "bulkmail-backend-vypd.onrender.com/sendemail",
+        "https://bulkmail-backend-vypd.onrender.com/sendemail",
         {
           msg: msg.trim(),
           emailList: emailList,
