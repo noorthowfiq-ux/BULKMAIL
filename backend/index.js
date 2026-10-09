@@ -1,32 +1,42 @@
-
 const express = require("express");
 const cors = require("cors");
 const mongoose = require("mongoose");
 const nodemailer = require("nodemailer");
+
 const app = express();
 
-const corsOptions = {
-  origin: [
-    "http://localhost:3000",
-    "https://depfront.vercel.app",
-    "https://bulkmail-two-theta.vercel.app"
-  ],
-};
+app.use(
+  cors({
+    origin: [
+      "http://localhost:3000",
+      "https://depfront.vercel.app",
+      "https://bulkmail-two-theta.vercel.app",
+    ],
+  })
+);
 
-app.use(cors(corsOptions));
-app.use(express.json());
-app.get("/", (req, res) => {
-  res.send("BulkMail Backend is running successfully!");
-});
+app.use(express.json({ limit: "1mb" }));
+
+// -------------------------------------
+// CONFIGURATION
+// -------------------------------------
+
 const MONGODB_URI =
   "mongodb+srv://BULKMAIL-:IQ37UPFEmEU2m62V@mailshot.s8ilzmw.mongodb.net/bulkmail";
 
+const GMAIL_USER = "laugherlaugher9@gmail.com";
+const GMAIL_APP_PASSWORD = "kiym zgco qfkr isnu";
+
+// -------------------------------------
+// DATABASE
+// -------------------------------------
+
 mongoose.connection.on("connected", () => {
-  console.log("MongoDB Connected Successfully");
+  console.log("MongoDB connected successfully");
 });
 
 mongoose.connection.on("error", (error) => {
-  console.error("MongoDB Error:", error.message);
+  console.error("MongoDB error:", error.message);
 });
 
 const campaignSchema = new mongoose.Schema({
@@ -52,7 +62,7 @@ const campaignSchema = new mongoose.Schema({
 
   status: {
     type: String,
-    enum: ["pending", "sent", "failed"],
+    enum: ["pending", "sending", "sent", "failed"],
     default: "pending",
   },
 
@@ -69,44 +79,128 @@ const campaignSchema = new mongoose.Schema({
 
 const Campaign = mongoose.model("Campaign", campaignSchema);
 
+// -------------------------------------
+// EMAIL TRANSPORT
+// -------------------------------------
+
 const transporter = nodemailer.createTransport({
-  service: "gmail",
+  host: "smtp.gmail.com",
+  port: 465,
+  secure: true,
+
   auth: {
-    user: "laugherlaugher9@gmail.com",
-    pass: "kiym zgco qfkr isnu",
+    user: GMAIL_USER,
+    pass: GMAIL_APP_PASSWORD,
   },
+
+  // Fail relatively quickly if SMTP cannot connect.
+  connectionTimeout: 10000,
+  greetingTimeout: 10000,
+  socketTimeout: 20000,
 });
 
-const emailTemplate = (message, recipient) => ({
-  from: "laugherlaugher9@gmail.com",
-  to: recipient,
-  subject: "You get Text Message from Your App!",
-  text: message,
-});
+// -------------------------------------
+// EMAIL TEMPLATE
+// -------------------------------------
 
-const sendMails = async (message, emailList, campaign) => {
-  for (const recipient of emailList) {
-    const mailOptions = emailTemplate(message, recipient);
+function emailTemplate(message, recipient) {
+  return {
+    from: GMAIL_USER,
+    to: recipient,
+    subject: "You get Text Message from Your App!",
+    text: message,
+  };
+}
 
-    const info = await transporter.sendMail(mailOptions);
+// -------------------------------------
+// BACKGROUND CAMPAIGN PROCESSOR
+// -------------------------------------
 
-    console.log("Email sent to:", recipient);
-    console.log("Message ID:", info.messageId);
+async function processCampaign(campaignId) {
+  let campaign;
 
-    campaign.sentCount += 1;
+  try {
+    campaign = await Campaign.findById(campaignId);
+
+    if (!campaign) {
+      console.error("Campaign not found:", campaignId);
+      return;
+    }
+
+    campaign.status = "sending";
+    campaign.error = "";
     await campaign.save();
+
+    console.log("Starting campaign:", campaignId);
+    console.log("Recipient count:", campaign.recipients.length);
+
+    for (const recipient of campaign.recipients) {
+      try {
+        const info = await transporter.sendMail(
+          emailTemplate(campaign.message, recipient)
+        );
+
+        console.log("Email sent to:", recipient);
+        console.log("Message ID:", info.messageId);
+
+        campaign.sentCount += 1;
+        await campaign.save();
+      } catch (error) {
+        console.error(
+          "Email failed for recipient:",
+          recipient,
+          error.message
+        );
+
+        campaign.status = "failed";
+        campaign.error = error.message || "Email delivery failed.";
+
+        await campaign.save();
+        return;
+      }
+    }
+
+    campaign.status = "sent";
+    campaign.error = "";
+    await campaign.save();
+
+    console.log("Campaign completed:", campaignId);
+  } catch (error) {
+    console.error("Campaign processing error:", error);
+
+    if (campaign) {
+      try {
+        campaign.status = "failed";
+        campaign.error =
+          error.message || "Unknown campaign processing error.";
+
+        await campaign.save();
+      } catch (dbError) {
+        console.error(
+          "Unable to update campaign:",
+          dbError.message
+        );
+      }
+    }
   }
-};
+}
+
+// -------------------------------------
+// HEALTH CHECK
+// -------------------------------------
+
+app.get("/", (req, res) => {
+  res.status(200).send("BulkMail Backend is running successfully!");
+});
+
+// -------------------------------------
+// SEND EMAILS
+// -------------------------------------
 
 app.post("/sendemail", async (req, res) => {
-  let campaign = null;
-
   try {
     const emailMessage = req.body.msg ?? req.body.message;
     const emailList = req.body.emailList;
-
-    console.log("Received message:", emailMessage);
-    console.log("Received recipients:", emailList);
 
     if (
       typeof emailMessage !== "string" ||
@@ -118,61 +212,77 @@ app.post("/sendemail", async (req, res) => {
       });
     }
 
-    if (!Array.isArray(emailList) || emailList.length === 0) {
+    if (
+      !Array.isArray(emailList) ||
+      emailList.length === 0
+    ) {
       return res.status(400).json({
         success: false,
         message: "No recipients provided.",
       });
     }
 
-    campaign = await Campaign.create({
+    const recipients = [
+      ...new Set(
+        emailList
+          .filter((email) => typeof email === "string")
+          .map((email) => email.trim().toLowerCase())
+          .filter((email) =>
+            /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+          )
+      ),
+    ];
+
+    if (recipients.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "No valid email addresses were provided.",
+      });
+    }
+
+    const campaign = await Campaign.create({
       message: emailMessage.trim(),
-      recipients: emailList,
-      recipientCount: emailList.length,
+      recipients,
+      recipientCount: recipients.length,
       sentCount: 0,
       status: "pending",
+      error: "",
     });
 
-    await sendMails(
-      emailMessage.trim(),
-      emailList,
-      campaign
-    );
+    console.log("Campaign created:", campaign._id);
 
-    campaign.status = "sent";
-    campaign.error = "";
-    await campaign.save();
-
-    return res.status(200).json({
+    // Respond immediately; don't make the browser wait for SMTP.
+    res.status(202).json({
       success: true,
-      message: "Emails sent successfully.",
+      message:
+        "Campaign accepted. Check campaign history for the final status.",
       campaignId: campaign._id,
       recipientCount: campaign.recipientCount,
       sentCount: campaign.sentCount,
+      status: campaign.status,
+    });
+
+    // Continue processing after the response has been sent.
+    setImmediate(() => {
+      processCampaign(campaign._id).catch((error) => {
+        console.error("Unexpected background error:", error);
+      });
     });
   } catch (error) {
-    console.error("Error sending emails:", error);
+    console.error("Unable to create campaign:", error);
 
-    if (campaign) {
-      try {
-        campaign.status = "failed";
-        campaign.error = error.message || "Unknown error";
-        await campaign.save();
-      } catch (dbError) {
-        console.error(
-          "Could not update campaign:",
-          dbError.message
-        );
-      }
+    if (!res.headersSent) {
+      return res.status(500).json({
+        success: false,
+        message: "Unable to create the email campaign.",
+      });
     }
-
-    return res.status(500).json({
-      success: false,
-      message: error.message || "Failed to send emails.",
-      campaignId: campaign ? campaign._id : undefined,
-    });
   }
 });
+
+// -------------------------------------
+// CAMPAIGN HISTORY
+// -------------------------------------
 
 app.get("/campaigns", async (req, res) => {
   try {
@@ -191,20 +301,33 @@ app.get("/campaigns", async (req, res) => {
   }
 });
 
+// -------------------------------------
+// START SERVER
+// -------------------------------------
+
 async function startServer() {
   try {
+    if (
+      MONGODB_URI === "YOUR_NEW_MONGODB_CONNECTION_STRING" ||
+      !GMAIL_USER ||
+      GMAIL_USER === "YOUR_GMAIL_ADDRESS" ||
+      !GMAIL_APP_PASSWORD ||
+      GMAIL_APP_PASSWORD === "YOUR_NEW_GMAIL_APP_PASSWORD"
+    ) {
+      throw new Error(
+        "Please configure the MongoDB URI and Gmail credentials."
+      );
+    }
+
     await mongoose.connect(MONGODB_URI);
 
     const PORT = process.env.PORT || 5000;
 
     app.listen(PORT, () => {
-      console.log(`Server Started on port ${PORT}`);
+      console.log(`BulkMail server listening on port ${PORT}`);
     });
   } catch (error) {
-    console.error(
-      "MongoDB connection failed:",
-      error.message
-    );
+    console.error("Server startup failed:", error.message);
     process.exit(1);
   }
 }
